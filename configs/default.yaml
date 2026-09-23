@@ -1,0 +1,24 @@
+seed: 42
+data_dir: data
+dataset: cifar10  # cifar10 | fashion_mnist
+batch_size: 128
+num_workers: 0
+epochs_teacher: 3
+epochs_student: 3
+epochs_finetune: 1
+lr: 0.01
+momentum: 0.9
+weight_decay: 0.0001
+device: cpu  # cpu | cuda | auto
+
+distill:
+  temperature: 4.0
+  alpha: 0.7  # weight on KL(teacher||student); (1-alpha) on hard labels
+
+prune:
+  amount: 0.5  # unstructured global magnitude sparsity
+  finetune: true
+
+quant:
+  backend: x86  # x86 | qnnpack
+  calibration_batches: 20

@@ -1,0 +1,16 @@
+[project]
+name = "model-compression-bench"
+version = "0.1.0"
+description = "Compare knowledge distillation, quantization, and pruning on a shared image-classification baseline."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "torch>=2.2.0",
+  "torchvision>=0.17.0",
+  "pyyaml>=6.0",
+  "pandas>=2.0",
+  "tabulate>=0.9",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
