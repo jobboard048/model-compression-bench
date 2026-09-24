@@ -10,7 +10,11 @@ dependencies = [
   "pyyaml>=6.0",
   "pandas>=2.0",
   "tabulate>=0.9",
+  "tqdm>=4.66",
 ]
+
+[project.optional-dependencies]
+test = ["pytest>=8.0"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

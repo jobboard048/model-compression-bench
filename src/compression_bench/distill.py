@@ -34,7 +34,7 @@ def train_distill(
     lr: float = 0.01,
     momentum: float = 0.9,
     weight_decay: float = 1e-4,
-) -> None:
+) -> list[dict]:
     student.to(device)
     teacher.to(device)
     teacher.eval()
@@ -44,6 +44,7 @@ def train_distill(
     opt = torch.optim.SGD(
         student.parameters(), lr=lr, momentum=momentum, weight_decay=weight_decay
     )
+    losses: list[dict] = []
     for epoch in range(epochs):
         running = 0.0
         n = 0
@@ -59,3 +60,5 @@ def train_distill(
             running += loss.item() * x.size(0)
             n += x.size(0)
         print(f"  distill epoch {epoch + 1}: loss={running / max(n, 1):.4f}")
+        losses.append({"epoch": epoch + 1, "train_loss": running / max(n, 1)})
+    return losses

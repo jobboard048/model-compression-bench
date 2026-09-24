@@ -6,8 +6,34 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader
 
+PREFERRED_QUANT_BACKENDS = ("x86", "fbgemm", "onednn", "qnnpack")
 
-def prepare_for_static_quant(model: nn.Module, backend: str = "x86") -> nn.Module:
+
+def resolve_quant_backend(
+    requested: str = "auto",
+    supported: list[str] | tuple[str, ...] | None = None,
+) -> str:
+    """Pick a quantized engine this PyTorch build can actually run."""
+    engines = list(
+        supported
+        if supported is not None
+        else getattr(torch.backends.quantized, "supported_engines", [])
+    )
+    name = (requested or "auto").strip().lower()
+    if name not in {"auto", "", "none"} and name in engines:
+        return name
+    for candidate in PREFERRED_QUANT_BACKENDS:
+        if candidate in engines:
+            return candidate
+    if engines:
+        return engines[0]
+    raise RuntimeError(
+        "No quantized engine in this PyTorch build "
+        f"(requested={requested!r}, supported={engines})"
+    )
+
+
+def prepare_for_static_quant(model: nn.Module, backend: str = "auto") -> nn.Module:
     model = copy.deepcopy(model)
     model.eval()
     model.cpu()
@@ -16,12 +42,9 @@ def prepare_for_static_quant(model: nn.Module, backend: str = "x86") -> nn.Modul
             model.fuse_model()
         except Exception:
             pass
-    if backend == "qnnpack":
-        torch.backends.quantized.engine = "qnnpack"
-        qconfig = torch.ao.quantization.get_default_qconfig("qnnpack")
-    else:
-        torch.backends.quantized.engine = "x86"
-        qconfig = torch.ao.quantization.get_default_qconfig("x86")
+    resolved = resolve_quant_backend(backend)
+    torch.backends.quantized.engine = resolved
+    qconfig = torch.ao.quantization.get_default_qconfig(resolved)
     model.qconfig = qconfig
     torch.ao.quantization.prepare(model, inplace=True)
     return model

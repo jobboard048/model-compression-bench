@@ -1,0 +1,16 @@
+README.md
+pyproject.toml
+src/compression_bench/__init__.py
+src/compression_bench/data.py
+src/compression_bench/distill.py
+src/compression_bench/evaluate.py
+src/compression_bench/models.py
+src/compression_bench/prune.py
+src/compression_bench/quantize.py
+src/compression_bench/train.py
+src/model_compression_bench.egg-info/PKG-INFO
+src/model_compression_bench.egg-info/SOURCES.txt
+src/model_compression_bench.egg-info/dependency_links.txt
+src/model_compression_bench.egg-info/requires.txt
+src/model_compression_bench.egg-info/top_level.txt
+tests/test_core.py

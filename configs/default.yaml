@@ -9,7 +9,7 @@ epochs_finetune: 1
 lr: 0.01
 momentum: 0.9
 weight_decay: 0.0001
-device: cpu  # cpu | cuda | auto
+device: auto  # auto | cpu | cuda
 
 distill:
   temperature: 4.0
@@ -20,5 +20,5 @@ prune:
   finetune: true
 
 quant:
-  backend: x86  # x86 | qnnpack
+  backend: auto  # auto | x86 | fbgemm | onednn | qnnpack
   calibration_batches: 20

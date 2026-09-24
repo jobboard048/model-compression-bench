@@ -25,6 +25,31 @@ def accuracy(model: nn.Module, loader: DataLoader, device: torch.device) -> floa
     return correct / total if total else 0.0
 
 
+def per_class_accuracy(
+    model: nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+    class_names: list[str],
+) -> dict[str, float]:
+    model.eval()
+    n = len(class_names)
+    correct = [0] * n
+    total = [0] * n
+    with torch.no_grad():
+        for x, y in loader:
+            x, y = x.to(device), y.to(device)
+            pred = model(x).argmax(dim=1)
+            for label, guess in zip(y.tolist(), pred.tolist()):
+                if 0 <= label < n:
+                    total[label] += 1
+                    if guess == label:
+                        correct[label] += 1
+    return {
+        name: (correct[i] / total[i] if total[i] else 0.0)
+        for i, name in enumerate(class_names)
+    }
+
+
 def parameter_count(model: nn.Module) -> int:
     return sum(p.numel() for p in model.parameters())
 
