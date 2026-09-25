@@ -1,6 +1,11 @@
 from compression_bench.distill import distillation_loss
 from compression_bench.models import student_model, teacher_model
-from compression_bench.prune import apply_global_unstructured_pruning, sparsity
+from compression_bench.prune import (
+    apply_global_unstructured_pruning,
+    finalize_pruning,
+    prunable_weight_sparsity,
+    sparsity,
+)
 from compression_bench.quantize import resolve_quant_backend
 from compression_bench.train import suggest_plateau_epoch
 
@@ -27,9 +32,25 @@ def test_pruning_increases_sparsity() -> None:
     m = student_model()
     before = sparsity(m)
     apply_global_unstructured_pruning(m, amount=0.5)
+    finalize_pruning(m, expected_amount=0.5)
     after = sparsity(m)
     assert after > before
     assert after > 0.3
+
+
+def test_prune_mask_survives_sgd_step() -> None:
+    m = student_model()
+    apply_global_unstructured_pruning(m, amount=0.5)
+    opt = torch.optim.SGD(m.parameters(), lr=0.1)
+    x = torch.randn(4, 1, 28, 28)
+    y = torch.randint(0, 10, (4,))
+    opt.zero_grad()
+    loss = torch.nn.functional.cross_entropy(m(x), y)
+    loss.backward()
+    opt.step()
+    assert prunable_weight_sparsity(m) > 0.45
+    finalize_pruning(m, expected_amount=0.5)
+    assert abs(sparsity(m) - 0.5) < 0.02
 
 
 def test_distillation_loss_finite() -> None:

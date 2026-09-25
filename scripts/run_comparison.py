@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import random
 from pathlib import Path
@@ -13,7 +14,11 @@ from compression_bench.data import build_dataloaders, dataset_class_names
 from compression_bench.distill import train_distill
 from compression_bench.evaluate import collect_metrics, per_class_accuracy, save_checkpoint
 from compression_bench.models import student_model, teacher_model
-from compression_bench.prune import apply_global_unstructured_pruning
+from compression_bench.prune import (
+    apply_global_unstructured_pruning,
+    finalize_pruning,
+    sparsity,
+)
 from compression_bench.quantize import (
     calibrate,
     convert_static_quant,
@@ -87,6 +92,142 @@ def run(
     )
 
 
+def curve_amounts(cfg: dict) -> list[float]:
+    raw = cfg.get("prune", {}).get("curve_amounts", [0.0, 0.3, 0.5, 0.8])
+    return [float(amount) for amount in raw]
+
+
+def finetune_at_sparsity(
+    teacher: torch.nn.Module,
+    amount: float,
+    train_loader,
+    cfg: dict,
+    device: torch.device,
+    n_finetune: int,
+    desc: str,
+) -> tuple[torch.nn.Module, list[dict]]:
+    """Copy the teacher, optionally prune with the mask held, then fine-tune."""
+    model = copy.deepcopy(teacher)
+    if amount > 0:
+        print(
+            f"Pruning teacher (global unstructured L1, amount={amount:.2f}); "
+            "mask stays on during fine-tune..."
+        )
+        apply_global_unstructured_pruning(model, amount=amount)
+    else:
+        print("Fine-tune control (amount=0, no prune)...")
+    rows: list[dict] = []
+    if cfg.get("prune", {}).get("finetune", True) and n_finetune > 0:
+        rows = train_supervised(
+            model,
+            train_loader,
+            epochs=n_finetune,
+            device=device,
+            lr=float(cfg["lr"]) * 0.1,
+            momentum=float(cfg["momentum"]),
+            weight_decay=float(cfg["weight_decay"]),
+            desc=desc,
+        )
+    if amount > 0:
+        finalize_pruning(model, expected_amount=amount)
+        print(f"  baked sparsity={sparsity(model):.4f} (target {amount:.2f})")
+    return model, rows
+
+
+def run_prune_curve(
+    teacher: torch.nn.Module,
+    train_loader,
+    test_loader,
+    cfg: dict,
+    device: torch.device,
+    n_finetune: int,
+    out_dir: Path,
+) -> tuple[torch.nn.Module, pd.DataFrame]:
+    """Fine-tune one copy per sparsity. Reuse the configured amount for teacher_pruned."""
+    target = float(cfg["prune"]["amount"])
+    amounts = curve_amounts(cfg)
+    if not any(abs(amount - target) < 1e-6 for amount in amounts):
+        amounts = [*amounts, target]
+    pruned: torch.nn.Module | None = None
+    target_rows: list[dict] = []
+    curve_rows: list[dict] = []
+    for amount in amounts:
+        desc = "prune-ft" if abs(amount - target) < 1e-6 else f"prune-ft-{amount:.1f}"
+        model, rows = finetune_at_sparsity(
+            teacher, amount, train_loader, cfg, device, n_finetune, desc
+        )
+        metrics = collect_metrics(f"amount_{amount:.1f}", model, test_loader, device)
+        curve_rows.append(
+            {
+                "amount": amount,
+                "sparsity": metrics["sparsity"],
+                "accuracy": metrics["accuracy"],
+                "nonzero_params": metrics["nonzero_params"],
+            }
+        )
+        if abs(amount - target) < 1e-6:
+            pruned = model
+            target_rows = rows
+    if pruned is None:
+        raise RuntimeError(f"Prune curve did not include amount {target}")
+    if target_rows:
+        pd.DataFrame(target_rows).to_csv(out_dir / "prune_finetune_curve.csv", index=False)
+    curve = pd.DataFrame(curve_rows)
+    curve_path = out_dir / "prune_sparsity_curve.csv"
+    curve.to_csv(curve_path, index=False)
+    print(f"Wrote {curve_path}")
+    save_checkpoint(pruned, out_dir / "teacher_pruned.pt")
+    return pruned, curve
+
+
+def upsert_named_row(df: pd.DataFrame, row: dict) -> pd.DataFrame:
+    name = row["name"]
+    if "name" in df.columns and (df["name"] == name).any():
+        idx = df.index[df["name"] == name][0]
+        for key, value in row.items():
+            df.loc[idx, key] = value
+        return df
+    return pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+
+
+def refresh_pruned_rows(
+    pruned: torch.nn.Module,
+    test_loader,
+    cfg: dict,
+    device: torch.device,
+    out_dir: Path,
+) -> pd.DataFrame:
+    """Replace only the teacher_pruned rows. Leave distillation and INT8 rows."""
+    metrics = collect_metrics("teacher_pruned", pruned, test_loader, device)
+    csv_path = out_dir / "comparison.csv"
+    json_path = out_dir / "comparison.json"
+    if csv_path.is_file():
+        df = upsert_named_row(pd.read_csv(csv_path), metrics)
+    else:
+        df = pd.DataFrame([metrics])
+    df.to_csv(csv_path, index=False)
+    json_path.write_text(df.to_json(orient="records", indent=2), encoding="utf-8")
+
+    names = dataset_class_names(str(cfg["dataset"]))
+    try:
+        pruned.to(device)
+        accs = per_class_accuracy(pruned, test_loader, device, names)
+    except Exception:
+        pruned.cpu()
+        accs = per_class_accuracy(pruned, test_loader, torch.device("cpu"), names)
+    per_path = out_dir / "per_class_accuracy.csv"
+    per_row = {"name": "teacher_pruned", **accs}
+    if per_path.is_file():
+        per_df = upsert_named_row(pd.read_csv(per_path), per_row)
+    else:
+        per_df = pd.DataFrame([per_row])
+    per_df.to_csv(per_path, index=False)
+    print("\n=== Prune refresh ===")
+    print(df.to_markdown(index=False))
+    print(f"\nWrote {csv_path}")
+    return df
+
+
 def finish_comparison(
     teacher: torch.nn.Module,
     train_loader,
@@ -139,23 +280,9 @@ def finish_comparison(
     write_curve("student_kd_curve.csv", kd_rows)
     save_checkpoint(student_kd, out_dir / "student_kd.pt")
 
-    pruned = teacher_model(in_channels=in_ch, num_classes=n_cls)
-    pruned.load_state_dict(teacher.state_dict())
-    print("Pruning teacher (global unstructured L1)...")
-    apply_global_unstructured_pruning(pruned, amount=float(cfg["prune"]["amount"]))
-    if cfg["prune"].get("finetune", True):
-        prune_rows = train_supervised(
-            pruned,
-            train_loader,
-            epochs=n_finetune,
-            device=device,
-            lr=float(cfg["lr"]) * 0.1,
-            momentum=float(cfg["momentum"]),
-            weight_decay=float(cfg["weight_decay"]),
-            desc="prune-ft",
-        )
-        write_curve("prune_finetune_curve.csv", prune_rows)
-    save_checkpoint(pruned, out_dir / "teacher_pruned.pt")
+    pruned, _curve = run_prune_curve(
+        teacher, train_loader, test_loader, cfg, device, n_finetune, out_dir
+    )
 
     print("Dynamic INT8 quantization (Linear layers)...")
     teacher_dyn = dynamic_quant(teacher.cpu())

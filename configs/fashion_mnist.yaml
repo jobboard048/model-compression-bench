@@ -16,8 +16,9 @@ distill:
   alpha: 0.7  # weight on KL(teacher||student); (1-alpha) on hard labels
 
 prune:
-  amount: 0.5  # unstructured global magnitude sparsity
+  amount: 0.5  # unstructured global magnitude sparsity (mask held through fine-tune)
   finetune: true
+  curve_amounts: [0.0, 0.3, 0.5, 0.8]
 
 quant:
   backend: auto  # auto | x86 | fbgemm | onednn | qnnpack

@@ -56,7 +56,7 @@ from compression_bench.data import build_train_val_test_loaders
 from compression_bench.evaluate import accuracy, save_checkpoint
 from compression_bench.models import teacher_model
 from compression_bench.train import suggest_plateau_epoch, train_one_epoch
-from run_comparison import finish_comparison, resolve_device
+from run_comparison import finish_comparison, refresh_pruned_rows, resolve_device, run_prune_curve
 from save_sample_grid import save_sample_grid
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -64,6 +64,30 @@ CONFIGS = {
     "fashion_mnist": ROOT / "configs" / "fashion_mnist.yaml",
     "cifar10": ROOT / "configs" / "default.yaml",
 }
+
+
+class _Tee:
+    """Write to the console and a log file at the same time."""
+
+    def __init__(self, console, log_file) -> None:
+        self.console = console
+        self.log_file = log_file
+
+    def write(self, data: str) -> int:
+        self.console.write(data)
+        self.log_file.write(data)
+        self.flush()
+        return len(data)
+
+    def flush(self) -> None:
+        self.console.flush()
+        self.log_file.flush()
+
+    def isatty(self) -> bool:
+        return self.console.isatty()
+
+    def fileno(self) -> int:
+        return self.console.fileno()
 
 
 def set_seed(seed: int) -> None:
@@ -142,6 +166,11 @@ def main() -> None:
     )
     parser.add_argument("--val-fraction", type=float, default=0.1)
     parser.add_argument("--skip-static-quant", action="store_true")
+    parser.add_argument(
+        "--prune-only",
+        action="store_true",
+        help="Reload teacher_fp32.pt and rerun masked prune plus the sparsity curve",
+    )
     args = parser.parse_args()
 
     config = args.config if args.config is not None else CONFIGS[args.dataset]
@@ -152,8 +181,26 @@ def main() -> None:
     if not out.is_absolute():
         out = (Path.cwd() / out).resolve()
     out.mkdir(parents=True, exist_ok=True)
+    log_path = out / ("prune_rerun.log" if args.prune_only else "run.log")
+    log_file = log_path.open("w", encoding="utf-8", buffering=1)
+    stdout, stderr = sys.stdout, sys.stderr
+    sys.stdout = _Tee(stdout, log_file)
+    sys.stderr = _Tee(stderr, log_file)
+    try:
+        _run(args, config, out)
+    finally:
+        sys.stdout = stdout
+        sys.stderr = stderr
+        log_file.close()
+        stdout.write(f"Wrote {log_path}\n")
 
+
+def _run(args, config: Path, out: Path) -> None:
     cfg = yaml.safe_load(config.read_text(encoding="utf-8"))
+    if args.prune_only:
+        _run_prune_only(args, cfg, out)
+        return
+    print(f"Logging to {out / 'run.log'}")
     print(f"Saving class sample grid to {out / 'samples.png'} ...")
     save_sample_grid(str(cfg["dataset"]), Path(cfg["data_dir"]), out / "samples.png")
     set_seed(int(cfg.get("seed", 42)))
@@ -181,6 +228,7 @@ def main() -> None:
         "val_fraction": args.val_fraction,
         "epochs_finetune": n_finetune,
         "out_dir": str(out),
+        "log": str(out / "run.log"),
     }
     (out / "run_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     finish_comparison(
@@ -196,6 +244,32 @@ def main() -> None:
         n_finetune=n_finetune,
         skip_static_quant=args.skip_static_quant,
     )
+
+
+def _run_prune_only(args, cfg: dict, out: Path) -> None:
+    ckpt = out / "teacher_fp32.pt"
+    if not ckpt.is_file():
+        raise SystemExit(f"No teacher checkpoint at {ckpt}. Run python scripts/run.py first.")
+    print(f"Logging to {out / 'prune_rerun.log'}")
+    print(f"Reloading teacher from {ckpt}")
+    set_seed(int(cfg.get("seed", 42)))
+    device = resolve_device(str(cfg.get("device", "cpu")))
+    train_loader, _val_loader, test_loader, in_ch, n_cls = build_train_val_test_loaders(
+        dataset=cfg["dataset"],
+        data_dir=cfg["data_dir"],
+        batch_size=int(cfg["batch_size"]),
+        num_workers=int(cfg.get("num_workers", 0)),
+        val_fraction=args.val_fraction,
+        seed=int(cfg.get("seed", 42)),
+    )
+    teacher = teacher_model(in_channels=in_ch, num_classes=n_cls)
+    teacher.load_state_dict(torch.load(ckpt, map_location="cpu"))
+    teacher.to(device)
+    n_finetune = int(cfg.get("epochs_finetune", 1))
+    pruned, _curve = run_prune_curve(
+        teacher, train_loader, test_loader, cfg, device, n_finetune, out
+    )
+    refresh_pruned_rows(pruned, test_loader, cfg, device, out)
 
 
 if __name__ == "__main__":

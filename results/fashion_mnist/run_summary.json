@@ -1,0 +1,9 @@
+{
+  "dataset": "fashion_mnist",
+  "device": "cpu",
+  "max_epochs": 30,
+  "selected_epochs": 14,
+  "val_fraction": 0.1,
+  "epochs_finetune": 1,
+  "out_dir": "C:\\Users\\Admin\\model-compression-bench\\results\\fashion_mnist"
+}

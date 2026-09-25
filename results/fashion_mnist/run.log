@@ -1,0 +1,76 @@
+# Prefix reconstructed after Cursor truncated the live terminal buffer.
+# Teacher and student-CE epoch lines match the live print format, from CSVs.
+# From distillation onward, lines are copied from the run.py terminal (tqdm bars omitted).
+Saving class sample grid to C:\Users\Admin\model-compression-bench\results\fashion_mnist\samples.png ...
+Training teacher (max 30 epochs, stop when val accuracy plateaus)...
+  epoch 1: train_loss=0.6409 val_accuracy=0.8585
+  epoch 2: train_loss=0.3643 val_accuracy=0.8812
+  epoch 3: train_loss=0.3116 val_accuracy=0.8895
+  epoch 4: train_loss=0.2779 val_accuracy=0.9020
+  epoch 5: train_loss=0.2531 val_accuracy=0.8995
+  epoch 6: train_loss=0.2389 val_accuracy=0.9085
+  epoch 7: train_loss=0.2224 val_accuracy=0.9143
+  epoch 8: train_loss=0.2105 val_accuracy=0.9085
+  epoch 9: train_loss=0.1983 val_accuracy=0.9153
+  epoch 10: train_loss=0.1849 val_accuracy=0.9140
+  epoch 11: train_loss=0.1752 val_accuracy=0.9177
+  epoch 12: train_loss=0.1652 val_accuracy=0.9175
+  epoch 13: train_loss=0.1557 val_accuracy=0.9175
+  epoch 14: train_loss=0.1465 val_accuracy=0.9210
+  epoch 15: train_loss=0.1389 val_accuracy=0.9185
+  epoch 16: train_loss=0.1311 val_accuracy=0.9228
+  epoch 17: train_loss=0.1207 val_accuracy=0.9197
+  epoch 18: train_loss=0.1154 val_accuracy=0.9217
+Val accuracy plateaued. Using epoch 14 (best checkpoint).
+Students will train for 14 epochs.
+Training student without distillation (control)...
+  student-ce epoch 1: loss=0.7559
+  student-ce epoch 2: loss=0.4093
+  student-ce epoch 3: loss=0.3497
+  student-ce epoch 4: loss=0.3188
+  student-ce epoch 5: loss=0.2897
+  student-ce epoch 6: loss=0.2805
+  student-ce epoch 7: loss=0.2640
+  student-ce epoch 8: loss=0.2545
+  student-ce epoch 9: loss=0.2446
+  student-ce epoch 10: loss=0.2348
+  student-ce epoch 11: loss=0.2278
+  student-ce epoch 12: loss=0.2184
+  student-ce epoch 13: loss=0.2127
+  student-ce epoch 14: loss=0.2084
+Distilling student from teacher...
+  distill epoch 1: loss=1.9026
+  distill epoch 2: loss=0.5523
+  distill epoch 3: loss=0.4152
+  distill epoch 4: loss=0.3565
+  distill epoch 5: loss=0.3215
+  distill epoch 6: loss=0.2971
+  distill epoch 7: loss=0.2792
+  distill epoch 8: loss=0.2658
+  distill epoch 9: loss=0.2592
+  distill epoch 10: loss=0.2451
+  distill epoch 11: loss=0.2399
+  distill epoch 12: loss=0.2317
+  distill epoch 13: loss=0.2295
+  distill epoch 14: loss=0.2233
+Pruning teacher (global unstructured L1)...
+  prune-ft epoch 1: loss=0.0992
+Dynamic INT8 quantization (Linear layers)...
+C:\Users\Admin\model-compression-bench\.venv\Lib\site-packages\torch\ao\nn\quantized\modules\utils.py:72: UserWarning: torch.quantize_per_tensor, torch.quantize_per_channel and other quantized tensor creation functions that produce tensors with dtype torch.quint8, torch.qint8, and torch.qint32 are deprecated and will be removed in a future PyTorch release. Please see https://github.com/pytorch/pytorch/issues/184982 for more information. (Triggered internally at C:\actions-runner\_work\pytorch\pytorch\aten\src\ATen\quantized\Quantizer.cpp:116.)
+  qweight = torch.quantize_per_tensor(
+Static PTQ (calibrate + convert)...
+  using quantized engine 'onednn' (config 'auto')
+C:\Users\Admin\model-compression-bench\src\compression_bench\quantize.py:47: UserWarning: Default qconfig of oneDNN backend with reduce_range of false may have accuracy issues on CPU without Vector Neural Network Instruction support.
+  qconfig = torch.ao.quantization.get_default_qconfig(resolved)
+
+=== Comparison ===
+| name                 |   accuracy |   params |   nonzero_params |   sparsity |   size_mb | device   |   latency_p50_ms |   latency_p95_ms |   batch |
+|:---------------------|-----------:|---------:|-----------------:|-----------:|----------:|:---------|-----------------:|-----------------:|--------:|
+| teacher_fp32         |     0.9207 |   220234 |           220234 |  0         |  0.843335 | cpu      |         146.343  |         196.931  |     128 |
+| student_ce           |     0.8997 |    52138 |            52138 |  0         |  0.202161 | cpu      |          29.7082 |          46.9703 |     128 |
+| student_kd           |     0.909  |    52138 |            52138 |  0         |  0.202161 | cpu      |          80.252  |         139.519  |     128 |
+| teacher_pruned       |     0.9252 |   220234 |           215135 |  0.0231526 |  0.843396 | cpu      |         133.678  |         272.738  |     128 |
+| teacher_dynamic_int8 |     0.9198 |    18816 |            18816 |  0         |  0.268737 | cpu      |         135.171  |         172.101  |     128 |
+| teacher_static_int8  |     0.9197 |        0 |                0 |  0         |  0.22115  | cpu      |          35.4964 |          55.9277 |     128 |
+
+Wrote C:\Users\Admin\model-compression-bench\results\fashion_mnist\comparison.csv

@@ -1,6 +1,6 @@
 # Compressing a small CNN: distillation, pruning, and quantization on a laptop
 
-This post walks through a reproducible experiment: train a small convolutional network on a standard image-classification benchmark, then compress it three ways and compare **accuracy, size, and speed** on the same test set.
+I trained one small convolutional network on Fashion-MNIST, then compressed it three ways and measured accuracy, file size, and speed on the same 10,000-image test set. One seed, one laptop CPU, no claim that this ranks compression methods in general.
 
 The code is this repository. From the repo root:
 
@@ -10,142 +10,162 @@ python scripts/test.py
 python scripts/run.py
 ```
 
-`run.py` is the whole experiment. It trains **one** teacher (and stops early if validation accuracy plateaus), then trains a smaller student, a distilled student, a pruned teacher, and INT8 variants. Intermediate curves, a class sample grid, per-class accuracy, and checkpoints are written under `results/fashion_mnist/` (or `results/cifar10/`).
+`run.py` trains the teacher until validation accuracy plateaus, then trains a smaller student, a distilled student, a pruned teacher, and two INT8 variants. Curves, a class sample grid, per-class accuracy, and checkpoints land in `results/fashion_mnist/`.
+
+Hardware for the numbers below: Windows laptop, Intel UHD Graphics 620, no CUDA, PyTorch CPU, seed 42.
 
 ---
 
-## Why compress at all?
+## Why compress a model this small?
 
-A trained classifier is a pile of floating-point weights. For a tiny CNN that already fits in a megabyte, compression is not about saving a data centre. It is about asking, on the same task:
+The teacher is already under a megabyte. Compression here is not about saving a data centre. It is four questions on one task:
 
-- Can a **smaller network** match the big one?
-- Do **soft labels** from a teacher help the small network more than ordinary labels?
-- Does **zeroing weak weights** (pruning) keep accuracy?
-- Does **INT8** shrink the file without a large accuracy drop?
+- Can a smaller network match the big one?
+- Do the teacher's soft labels help that small network more than ordinary labels?
+- If you zero the weakest weights and keep them zero, does accuracy hold?
+- Does INT8 shrink the file without a large accuracy drop?
 
-Those questions only make sense if the dataset, architecture family, and metrics are shared. That is what a benchmark is for.
+Those questions only mean something when the dataset, the architecture family, and the metrics are shared.
 
 ---
 
 ## The dataset
 
-The default run uses **Fashion-MNIST** (Zalando): 70,000 grayscale 28×28 images of clothing, 10 classes, 60,000 train / 10,000 test. torchvision downloads it; the images are not committed to git.
+Fashion-MNIST (Zalando): 70,000 grayscale 28×28 images of clothing, 10 classes, 60,000 train and 10,000 test. torchvision downloads it.
 
-Each image is a **28 × 28 × 1** array (one brightness value per pixel). The 10 classes are T-shirt/top, trouser, pullover, dress, coat, sandal, shirt, sneaker, bag, and ankle boot.
+The classes are T-shirt/top, trouser, pullover, dress, coat, sandal, shirt, sneaker, bag, and ankle boot.
 
-**CIFAR-10** is the harder optional task (`python scripts/run.py --dataset cifar10`): 60,000 colour 32×32 images, 10 object classes (airplane, automobile, bird, cat, deer, dog, frog, horse, ship, truck), 50,000 train / 10,000 test, shape **32 × 32 × 3**.
+`run.py` writes `samples.png`, a labeled 2×5 grid of one training example per class.
 
-Both are standard research sets. Using them means someone else can rerun the same split and compare numbers. You do not spend the article explaining how you collected photos.
-
-`run.py` writes `samples.png`: a labeled 2×5 grid of one training example per class (unnormalized, so colours look like the photos).
+CIFAR-10 is the optional harder task (`python scripts/run.py --dataset cifar10`). The numbers in this post are Fashion-MNIST only.
 
 ---
 
 ## The models
 
-Teacher and student are the same CNN template with different width:
+Teacher and student are the same CNN with different width.
 
-- **Teacher:** wider (`width=32`), about 220k parameters on Fashion-MNIST.
-- **Student:** narrower (`width=8`), about 52k parameters.
+- Teacher: `width=32`, 220,234 parameters, 0.84 MB.
+- Student: `width=8`, 52,138 parameters, 0.20 MB.
 
-Quantization stubs wrap the network so static INT8 can insert fake-quant ops. Training is SGD with a small learning rate, on CPU unless CUDA is available (`device: auto`).
+Training is SGD (learning rate 0.01, momentum 0.9, weight decay 1e-4) on CPU. Each teacher epoch trains on 90% of the training set and scores the held-out 10%. The official test set is not used to pick the epoch.
 
----
-
-## How long to train
-
-Thirty epochs is a **maximum**, not a quota.
-
-Each teacher epoch: train on 90% of the training set, then measure accuracy on a held-out 10% (the official test set is unused for this decision). Training **stops** when validation accuracy has not improved by at least 0.2 percentage points for four epochs, or when the cap is hit. The comparison uses the **best** teacher checkpoint. Students train for that same epoch count.
-
-That avoids the mistake of ranking compression methods on a half-trained teacher.
+The cap was 30 epochs. Validation accuracy stopped improving by at least 0.2 points for four epochs, so training stopped at epoch 18 and the comparison used the best checkpoint, epoch 14 (validation accuracy 92.1%). Students then trained for 14 epochs.
 
 ---
 
-## Three compression methods (plus a smaller model)
+## Three compression methods
 
-### 1. Distillation
+### Distillation
 
-The teacher produces a probability distribution over 10 classes. The student is trained to match those **soft** labels (KL divergence at temperature 4) and the true **hard** labels (cross-entropy). Weight on the soft term is `alpha = 0.7`.
+The student matches the teacher's softened class probabilities (KL divergence, temperature 4) and the true labels (cross-entropy). The soft term has weight 0.7.
 
-A control student (`student_ce`) trains on hard labels only. If distillation works, `student_kd` should beat `student_ce` at the same size.
+A control student trains on hard labels only, same size, same epoch count. If distillation helps, that student should win.
 
-### 2. Pruning
+### Pruning
 
-Global unstructured L1 pruning zeros the smallest-magnitude conv and linear weights (config amount 50%). A short fine-tune follows. **Unstructured zeros do not shrink a dense `.pt` file.** The honest signals are `sparsity` and `nonzero_params`. If fine-tuning is done without keeping masks, zeros can fill back in (that happened on an early smoke run: ~6% sparsity instead of 50%).
+Global unstructured L1 pruning zeros the smallest-magnitude convolution and linear weights. The mask stays on during a one-epoch fine-tune at 0.1× the learning rate, then the zeros are baked into the checkpoint. The configured amount is 50%.
 
-### 3. Quantization
+A curve from the same teacher checkpoint also fine-tunes copies at 0%, 30%, 50%, and 80% sparsity. The 0% point is the extra epoch with no zeros, so a gain from "just train a bit more" is visible on its own.
 
-- **Dynamic INT8:** Linear layers in INT8 at runtime; convolutions stay fp32. Easy, portable.
-- **Static INT8:** calibrate on training batches, convert the graph. Stronger (convs can quantize too). The bench auto-selects the engine this PyTorch build actually has (`x86`, `fbgemm`, `onednn`, or `qnnpack`). On this Windows CPU wheel that is **onednn**. Eager-mode PTQ APIs are deprecated in current PyTorch (warnings, still working); the replacement is TorchAO, which is a rewrite, not a flag.
+Unstructured zeros do not shrink a dense `.pt` file and do not speed up this CPU. The honest signals are sparsity and nonzero parameter count.
 
----
+### Quantization
 
-## What gets saved (for figures)
+- Dynamic INT8 quantizes Linear layers at runtime. Convolutions stay fp32.
+- Static INT8 calibrates on 20 training batches and converts the graph, so convolutions can quantize too. This PyTorch build has no `x86` engine, so the run used `onednn`.
 
-After `python scripts/run.py`:
-
-| File | Use in the post |
-| --- | --- |
-| `samples.png` | “Here is the dataset” |
-| `teacher_curve.csv` | Val accuracy vs epoch; when we stopped |
-| `student_ce_curve.csv`, `student_kd_curve.csv` | Training dynamics of the two students |
-| `prune_finetune_curve.csv` | Fine-tune after prune |
-| `comparison.csv` | Main result table |
-| `per_class_accuracy.csv` | Did compression hurt shirts more than trousers? |
-| `run_summary.json` | Dataset, device, selected epochs |
-| `*.pt` | Reuse weights; not required to read the article |
+Eager-mode post-training quantization is deprecated in current PyTorch. It still runs. The replacement is TorchAO, which would be a rewrite, not a flag.
 
 ---
 
-## Results: 3-epoch smoke test (not the final story)
+## Results
 
-The numbers below are from an **early Fashion-MNIST run with 3 teacher/student epochs**, on CPU, **before** early-stopping `run.py` and **before** static INT8 used `onednn`. Treat them as a pipeline check. After you run `python scripts/run.py` to plateau, **replace this table** with `comparison.csv`.
+Official Fashion-MNIST test set, batch 128, CPU. Latency is the median of 50 timed batches after 10 warmup batches.
 
-| Variant | Test accuracy | Params | Size (MB) | Latency p50 (ms / batch 128) |
-| --- | ---: | ---: | ---: | ---: |
-| teacher_fp32 | 87.57% | 220,234 | 0.84 | 81 |
-| student_ce | 88.15% | 52,138 | 0.20 | 16 |
-| student_kd | 87.76% | 52,138 | 0.20 | 14 |
-| teacher_pruned | 89.62% | 220,234 | 0.84 | 76 |
-| teacher_dynamic_int8 | 87.63% | 18,816* | 0.27 | 47 |
+| Variant | Test accuracy | Nonzero params | Sparsity | Size (MB) | Latency p50 (ms) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| teacher fp32 | 92.07% | 220,234 | 0% | 0.84 | 146 |
+| student, hard labels | 89.97% | 52,138 | 0% | 0.20 | 30 |
+| student, distilled | 90.90% | 52,138 | 0% | 0.20 | 80 |
+| teacher, 50% pruned | 92.46% | 110,202 | 50.0% | 0.84 | 189 |
+| teacher, dynamic INT8 | 91.98% | — | — | 0.27 | 135 |
+| teacher, static INT8 | 91.97% | — | — | 0.22 | 35 |
 
-\*Dynamic INT8 `params` is not comparable to fp32 rows (packed quantized tensors).
+Dynamic INT8 parameter counts are packed quantized tensors, and the static checkpoint does not report a comparable parameter count, so those cells are left blank. Size and accuracy are the comparable columns.
 
-**What that smoke test actually showed**
+### Distillation
 
-- The **smaller student** was faster and smaller, and slightly *more* accurate than the undertrained teacher. Capacity was not the bottleneck at 3 epochs.
-- **Distillation did not beat hard labels**, which is expected when the teacher is not clearly better than the student.
-- **Prune + extra fine-tune** raised accuracy but barely increased sparsity: extra training, not successful 50% compression.
-- **Dynamic INT8** kept accuracy and cut checkpoint size. That is the cleanest compression signal in this table.
-- Static INT8 was skipped on that run because the code demanded an `x86` engine. Current `run.py` falls back to `onednn` and a convert smoke test succeeded on this laptop.
+The small student is about a quarter of the teacher in parameters and file size, and 2.1 points less accurate (89.97% vs 92.07%). Soft labels recover 0.93 points of that gap (90.90%) at the same size.
 
-Per-class accuracy was not recorded on that smoke run. A full `run.py` writes `per_class_accuracy.csv` so you can say which clothing classes dropped under INT8 or pruning.
+The two students are the same architecture, so the latency gap (30 ms vs 80 ms) is not a distillation effect. I would not quote it as one. The clean speed result is the hard-label student at 30 ms against the teacher's 146 ms.
+
+### Pruning
+
+Same teacher checkpoint, one fine-tune epoch each:
+
+| Target sparsity | Measured sparsity | Test accuracy |
+| --- | ---: | ---: |
+| 0% (extra epoch only) | 0% | 92.33% |
+| 30% | 30.0% | 92.41% |
+| 50% | 50.0% | 92.46% |
+| 80% | 79.9% | 92.10% |
+
+Most of the lift over the original teacher (92.07% → 92.33%) is the extra epoch. Holding half the weights at zero does not hurt: 92.46% is 0.13 points above that no-prune control, inside the noise of a 10,000-image test set. At 80% sparsity, accuracy falls back to the dense baseline (92.10%) and sits 0.23 points under the fine-tune control.
+
+The 50% checkpoint is still 0.84 MB, and the batch is slower (189 ms vs 146 ms). Zeroing weights counted. It did not compress the file or the runtime.
+
+### Quantization
+
+Static INT8 is the method that changes size and speed together: 91.97% accuracy, 0.22 MB, 35 ms. That is about 0.1 points under the fp32 teacher, a quarter of the file, and roughly four times faster on this CPU.
+
+Dynamic INT8 lands in the same accuracy band (91.98%) and shrinks the file to 0.27 MB, with almost no speedup (135 ms), because the convolutions stay fp32.
+
+oneDNN warned that its default config can be less accurate on a CPU without VNNI. The measured drop was still about 0.1 points.
+
+### Per class
+
+Overall accuracy hides the shirt class. Every variant is weakest there (about 75–78%). Trousers, sandals, bags, and ankle boots stay above 95%.
+
+Under 50% pruning, the coat drops from 92.5% to 88.4%, while the pullover rises from 85.5% to 89.0%. Static INT8 shows the same coat dip (87.3%). A 0.1-point overall change can still move one clothing class by several points.
 
 ---
 
-## How to read a *real* comparison
+## What I would take from this run
 
-A fair ranking needs a teacher that has **plateaued** on validation. Then:
+On this model and this dataset:
 
-1. If `student_kd` > `student_ce` at the same size, distillation helped.
-2. If pruned sparsity is near the configured 50% **and** accuracy holds, pruning compressed the *effective* weights (still check file size).
-3. If INT8 accuracy ≈ teacher and `size_mb` drops, quantization did its job.
-4. Per-class: look for classes that collapse (often shirt vs T-shirt on Fashion-MNIST). Overall accuracy can hide that.
+- A 4× smaller student keeps most of the accuracy. Distillation adds about a point over training that student on hard labels.
+- Unstructured pruning to 50% keeps accuracy if the zeros are not allowed to grow back. It does not make the checkpoint smaller or the CPU faster. 80% is where accuracy starts to give the extra training back.
+- Static INT8 is the compression that shows up in both the file size and the latency, with a negligible accuracy change on this test set.
+
+These are one seed on Fashion-MNIST. A 0.1–0.4 point gap is a few dozen images out of 10,000. I would rerun with more seeds before treating the prune curve as a ranking.
 
 ---
 
 ## Reproduce
 
-Same three commands on Windows, macOS, or Linux. `setup.py` creates `.venv` and installs CPU PyTorch if there is no NVIDIA GPU. `test.py` runs unit tests with no dataset download. `run.py` may take on the order of **one to a few hours** on a laptop CPU (shorter if val accuracy plateaus early).
+```text
+python scripts/setup.py
+python scripts/test.py
+python scripts/run.py
+```
 
-Hardware for the smoke table: Windows laptop, Intel UHD Graphics 620, no CUDA, PyTorch 2.14 CPU.
+`setup.py` creates `.venv` and installs CPU PyTorch when there is no NVIDIA GPU. `test.py` runs the unit tests with no dataset download. On this laptop the full run took a few hours; the teacher stopped at epoch 14 of a 30-epoch cap.
+
+To redo only the prune curve from the saved teacher, without retraining students or INT8:
+
+```text
+python scripts/run.py --prune-only
+```
+
+That writes `prune_rerun.log` and `prune_sparsity_curve.csv` and refreshes the pruned row. It does not overwrite `run.log`.
 
 ---
 
 ## Footnotes
 
-- CIFAR-10 comes from the Canadian Institute for Advanced Research; Fashion-MNIST from Zalando Research.
-- Unstructured prune ≠ smaller file unless you store sparse formats or prune structure.
-- PyTorch plans to delete `torch.ao.quantization` eventually (docs mentioned 2.10, then slipped; APIs still work on 2.14). Pin the wheel you used for the blog numbers.
-- Static INT8 on this CPU warned that oneDNN without VNNI can be less accurate. Report the engine name from the log (`using quantized engine 'onednn'`).
+- Fashion-MNIST is from Zalando Research. CIFAR-10 is from the Canadian Institute for Advanced Research.
+- Unstructured prune is not a smaller file unless you store a sparse format or prune whole channels.
+- `torch.ao.quantization` is on the way out in PyTorch. These numbers are from the eager API on a CPU wheel, engine `onednn`.
+- Dynamic INT8 `params` and static INT8 `params` in `comparison.csv` are not comparable to the fp32 counts. Use `size_mb`.
